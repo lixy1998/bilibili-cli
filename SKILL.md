@@ -1,252 +1,130 @@
 ---
 name: bilibili-cli
-description: CLI skill for Bilibili (哔哩哔哩, B站) with token-efficient YAML output for AI agents to browse videos, users, search, trending, dynamics, favorites, and interactions from the terminal
-author: jackwener
-version: "0.6.2"
-tags:
-  - bilibili
-  - 哔哩哔哩
-  - b站
-  - video
-  - social-media
-  - cli
+description: "通过终端命令行操作 Bilibili（哔哩哔哩）——搜索（排序/时间窗/分区/全字段）、读字幕与弹幕、抽画面帧、本地转写、榜单、动态、收藏夹；需登录时自动检测浏览器 Cookie 或扫码登录。当用户要求用 B 站 CLI 搜索或抓取 B 站内容时使用。"
+title: bilibili-cli
+author: jackwener（上游）／ lixy1998（fork 增强）
+source: https://github.com/lixy1998/bilibili-cli
+version: 0.7.0
+model: default
 ---
 
-# bilibili-cli Skill
+# bilibili-cli — B站 CLI（增强版）
 
-A CLI tool for interacting with Bilibili (哔哩哔哩). Use it to fetch video info, search content, browse user profiles, and perform interactions like liking or triple-clicking.
+命令行操作 Bilibili。相对上游 0.6.2，增强全在「搜索 → 取内容」这条链上：搜索能排序/卡时间窗/筛分区/出全字段/自动翻页；取内容能批量、能读弹幕、能抽帧、能跨轮去重。
 
-## Agent Defaults
-
-When you need machine-readable output:
-
-1. Prefer `--yaml` first because it is usually more token-efficient than pretty JSON.
-2. Use `--json` only when downstream tooling strictly requires JSON.
-3. Keep result sets small with `--max`, `--page`, or `--offset`.
-4. Prefer specific commands over broad ones. Example: use `bili user-videos 946974 --max 3 --yaml` instead of fetching large timelines.
-5. When summarizing a video, fetch subtitles first. Subtitles usually contain the video's core content and are the best primary source for summaries.
-6. Only fall back to `--ai`, comments, or audio extraction when subtitles are unavailable or clearly insufficient.
-
-## Prerequisites
+## 前置（每台机器一次）
 
 ```bash
-# Install (requires Python 3.10+)
-uv tool install bilibili-cli
-# Or: pipx install bilibili-cli
-
-# If you need audio extraction support (requires PyAV)
-uv tool install "bilibili-cli[audio]"
-# Or: pipx install "bilibili-cli[audio]"
-
-# Upgrade to latest (recommended to avoid API errors)
-uv tool upgrade bilibili-cli
-# Or: pipx upgrade bilibili-cli
+bili --version     # 期望 0.7.0 及以上
 ```
 
-## Authentication
-
-Most read commands work without login. Subtitles, favorites/following/watch-later/history, feed, and interactions require login.
+没有或版本偏低，任选一种装：
 
 ```bash
-bili status                    # Check if logged in (exit 0 = yes, 1 = no)
-bili login                     # QR code login (if not authenticated)
+# 1) 从仓库装固定版本（跨机器可复现）
+pip install --upgrade "git+https://github.com/lixy1998/bilibili-cli@v0.7.0"
+
+# 2) 本地已有源码：可编辑安装，改代码即生效
+pip install -e "<源码目录>" --no-deps
+
+# 3) 需要抽帧 / 本地转写时补 extras
+pip install "bilibili-cli[frames,asr] @ git+https://github.com/lixy1998/bilibili-cli@v0.7.0"
 ```
 
-Authentication auto-detects local browser cookies (Chrome/Firefox/Edge/Brave). If cookies are found and valid, no manual login needed. Credentials are saved to `~/.bilibili-cli/credential.json`.
+- 仓库是 `jackwener/bilibili-cli` 的 fork，**上游版本没有下面这些搜索参数**。
+- `bili` 由 Python 环境的 `Scripts` 目录提供；命令找不到时先查该目录是否在 PATH。
+- 抽帧要 Pillow，本地转写要 faster-whisper（模型需自备，见文末）。
 
-## Command Reference
-
-### Video
+## 搜索（主用法）
 
 ```bash
-# Get video details (accepts BV ID or full URL)
-bili video BV1ABcsztEcY
-bili video https://www.bilibili.com/video/BV1ABcsztEcY
-
-# Options
-bili video BV1ABcsztEcY --subtitle            # Show subtitles (plain text)
-bili video BV1ABcsztEcY --subtitle-timeline   # Show subtitles with timestamps
-bili video BV1ABcsztEcY -st --subtitle-format srt  # Export as SRT format
-bili video BV1ABcsztEcY --ai            # Show B站 AI summary
-bili video BV1ABcsztEcY --comments      # Show top comments
-bili video BV1ABcsztEcY --related       # Show related videos
-bili video BV1ABcsztEcY --yaml          # Token-efficient YAML output
-bili video BV1ABcsztEcY --json          # Structured JSON envelope
+bili search "历史教学" --type video --order pubdate --since 7d -n 30 --fields full --meta --yaml
 ```
 
-### User
+| 参数 | 作用 |
+|---|---|
+| `--order` | `totalrank` 综合 / `click` 最多播放 / `pubdate` 最新 / `dm` 最多弹幕 / `stow` 最多收藏 / `scores` 最多评论 |
+| `--since` / `--until` | `2026-11-01`、`7d`、`30d`、`today`；不传则不限 |
+| `--duration` | `lt10` / `10-30` / `30-60` / `gt60`（分钟） |
+| `--tid` | 分区 id 数字（如 188 科技） |
+| `--fields full` | 输出发布时间、播放/弹幕/收藏/评论数、UP 的 UID、封面、简介、标签、分区名、时长秒数 |
+| `-n` | 目标条数，**超过单页 42 条会自动翻页**（最多 10 页） |
+| `--meta` | 结构化输出附 `meta`（翻页数、是否截断、跳过账本条数） |
+| `--exclude-seen` | 跳过本地账本里已记录的视频（见「账本」） |
+
+- 默认 `--fields basic` 只给 6 个字段（bvid/标题/作者/播放/时长）；**要判断「值不值得看」必须加 `--fields full`**。
+- 新参数只对 `--type video` 生效；`--type user` 走原逻辑。
+- 取不满或触到翻页上限时 stderr 会明说，不会静默截断。
+
+## 取内容
+
+| 命令 | 说明 |
+|---|---|
+| `bili video <BV> [<BV>...] --yaml` | 视频详情；**支持一次多个 BV**，多条时输出 `data.items[]` |
+| `bili video --stdin` | 从标准输入读 BV 列表（空白/换行分隔），可管道接搜索结果 |
+| `bili video <BV> --subtitle` | 字幕（需登录）；失败会区分 `not_authenticated` / `no_subtitle_track` |
+| `bili video <BV> --ai / -c / -r` | AI 摘要 / 评论 / 相关推荐 |
+| `bili danmaku <BV> -n 100` | 弹幕（时间点+内容，判断真实反馈用） |
+| `bili crawl "<关键词>" -n 5 --since 7d` | **搜索+字幕一步到位**，输出可读 Markdown（`-o file.md` 落盘） |
+| `bili transcribe <BV>` | 文字稿：有字幕直接用，没字幕本地 faster-whisper 转写 |
+
+`crawl` 常用组合：
 
 ```bash
-# Look up user profile (by UID or username)
-bili user 946974
-bili user "影视飓风"
-
-# List user's videos
-bili user-videos 946974 --max 20
-bili user-videos "影视飓风" --yaml
+# 每天一轮「只看新的」：抓 5 条近 7 天的，抓完记账，下次自动跳过
+bili crawl "历史 教学" -n 5 --since 7d --exclude-seen --mark-seen -o out/today.md
 ```
 
-### Search
+- `--subtitle-chars 3000` 控制每条字幕保留字数（0 = 不限）；`--no-subtitle` 只出搜索结果。
+- 非交互环境默认输出 YAML；要 Markdown 就加 `OUTPUT=rich`。
+
+## 画面帧（无字幕的演示类视频）
 
 ```bash
-# Search users (default)
-bili search "关键词"
-
-# Search videos
-bili search "关键词" --type video
-
-# Pagination and limit
-bili search "关键词" --type video --max 5
-bili search "关键词" --page 2
+bili frames <BV> -n 3          # 均匀取 3 帧
+bili frames <BV> --at 143      # 取最接近 143 秒的一帧
 ```
 
-### Discovery
+走 B站故事板，**不下整片**，产出 PNG 路径（默认 `~/.bilibili-cli/frames/<BV>/`）。
+
+## 跨轮去重账本
 
 ```bash
-bili hot                       # Trending/popular videos
-bili hot --page 2 --max 10     # Page 2, limit 10
-bili rank                      # Site-wide ranking (3-day)
-bili rank --day 7 --max 30     # 7-day ranking, top 30
-bili feed                      # Dynamic timeline (requires login)
-bili feed --offset 1234567890  # Next page via returned cursor
-bili my-dynamics               # My posted dynamics (requires login)
-bili dynamic-post "hello"      # Publish text dynamic (requires write credential)
-bili dynamic-delete 123456789  # Delete one dynamic (requires write credential)
+bili seen list -n 20
+bili seen check BV1xx BV1yy     # 是否看过
+bili seen add BV1xx --note "历史教学"
+bili seen clear --yes
 ```
 
-### Collections (require login)
+账本：`~/.bilibili-cli/seen.jsonl`（`BILI_CLI_HOME` 可改目录）。`search` / `crawl` 加 `--exclude-seen` 会在**翻页过程中**跳过已记录的，并继续往后找补足条数。
+
+## 榜单与其它
 
 ```bash
-bili favorites                 # List favorite folders
-bili favorites <ID> --page 2   # Videos in a folder
-bili following                 # Following list
-bili watch-later               # Watch later list
-bili history                   # Watch history
+bili rank --type knowledge -n 20     # 分区：all/knowledge/tech/game/music/documentary/...
+bili hot / bili feed / bili favorites / bili following / bili history / bili watch-later
+bili like / coin / triple <BV>
 ```
 
-### Audio Extraction
+## 输出格式与退出码
 
-Requires `bilibili-cli[audio]` extra (PyAV). Install with `uv tool install "bilibili-cli[audio]"`.
+- 非 tty 自动 YAML；显式 `--yaml` / `--json`；`OUTPUT=rich` 强制人读表格。
+- 只读命令无需登录；字幕、收藏、互动需要登录（`bili login` 扫码，凭证存 `~/.bilibili-cli/credential.json`）。
+- **字幕取不到时退出码 2**（`ok: false` + `error.code`），不再伪装成「视频没字幕」；视频详情本身仍返回。
+- 其它失败退出码 1，`error.code` 取值：`invalid_input` / `not_authenticated` / `rate_limited` / `network_error` / `upstream_error` / `asr_unavailable`。
 
-```bash
-# Download audio and split into ASR-ready WAV segments (25s each, 16kHz mono)
-bili audio BV1ABcsztEcY                 # Split to /tmp/bilibili-cli/{title}/
-bili audio BV1ABcsztEcY --segment 60    # 60s per segment
-bili audio BV1ABcsztEcY --no-split      # Full m4a file, no splitting
-bili audio BV1ABcsztEcY -o ~/data/      # Custom output directory
-```
+## 干活顺序（推荐）
 
-### Interactions (require login)
+1. `bili search "<kw>" --type video --order pubdate --since 7d --fields full --meta --yaml` 拿候选
+2. 批量读内容 → `bili crawl`；单条深看 → `bili video <BV> --subtitle --yaml`
+3. 无字幕的演示类 → `bili frames <BV> -n 3` 看画面
+4. 判断真实反馈 → `bili danmaku <BV> -n 100`
+5. 要文字稿而字幕没有 → `bili transcribe <BV>`
+6. 记住看过的 → `bili seen add` 或 crawl `--mark-seen`
 
-```bash
-bili like BV1ABcsztEcY         # Like a video
-bili like BV1ABcsztEcY --undo  # Unlike
-bili coin BV1ABcsztEcY         # Give 1 coin
-bili coin BV1ABcsztEcY -n 2    # Give 2 coins
-bili triple BV1ABcsztEcY       # 一键三连 (like + coin + favorite)
-bili unfollow 946974           # Unfollow by UID
-```
+## 注意事项
 
-### Account
-
-```bash
-bili status                    # Quick login check
-bili status --yaml             # Structured auth status
-bili whoami                    # Detailed profile info
-bili whoami --yaml              # Profile as YAML
-bili whoami --json              # Profile as JSON
-bili login                     # QR code login
-bili logout                    # Clear credentials
-```
-
-## Structured Output
-
-Major query commands support both `--yaml` and `--json` for machine-readable output. Prefer YAML for agent use:
-
-```bash
-bili status --yaml                                # Quick structured auth check
-bili video BV1ABcsztEcY --yaml                       # Preferred for AI agents
-bili hot --max 5 --yaml                             # Smaller, token-efficient payload
-bili user 946974 --json | jq -r '.data.user.name'   # JSON when jq is needed
-```
-
-When stdout is not a TTY, `bilibili-cli` defaults to YAML automatically.
-Use `OUTPUT=yaml|json|rich|auto` to override the default output mode.
-All machine-readable output uses the envelope documented in [SCHEMA.md](./SCHEMA.md).
-
-## Debugging
-
-```bash
-bili -v <command>              # Enable verbose/debug logging for any command
-```
-
-## Common Patterns for AI Agents
-
-```bash
-# For video summarization, fetch subtitles first
-bili video BV1ABcsztEcY --subtitle
-
-# Only use AI summary as a fallback or secondary signal
-bili video BV1ABcsztEcY --ai
-
-# Get comments for sentiment analysis
-bili video BV1ABcsztEcY --comments
-
-# Extract audio for speech-to-text (ASR)
-# Segments are saved to /tmp/bilibili-cli/{title}/seg_000.wav, seg_001.wav, ...
-bili audio BV1ABcsztEcY --segment 25
-
-# Find a user's latest video BV ID with minimal payload
-bili user-videos 946974 --max 1 --yaml
-
-# Check if logged in before performing actions
-bili status && bili like BV1ABcsztEcY
-
-# Search and inspect the first few results
-bili search "topic" --type video --max 3 --yaml
-```
-
-### Workflow: Video Content Analysis
-
-```bash
-# 1. Search for a topic
-bili search "AI" --type video --max 5
-
-# 2. Get subtitles first for summarization
-bili video BV1xxx --subtitle
-
-# 3. If subtitles are missing or incomplete, try AI summary
-bili video BV1xxx --ai
-
-# 4. If there is still not enough content, extract audio for ASR
-bili audio BV1xxx --segment 25
-
-# 5. Get comments for audience reaction
-bili video BV1xxx --comments
-```
-
-### Workflow: UP主 Research
-
-```bash
-# 1. Look up UP主 profile
-bili user "影视飓风"
-
-# 2. Get their recent videos
-bili user-videos 946974 --max 10
-
-# 3. Inspect a specific video
-bili video BV1xxx --ai --comments
-```
-
-## Error Handling
-
-- Commands exit with code 0 on success, non-zero on failure
-- Error messages are prefixed with ❌
-- Login-required commands show ⚠️ with instruction to run `bili login`
-- Invalid BV IDs show a clear error message
-
-## Safety Notes
-
-- Do not ask users to share raw credential/cookie values in chat logs.
-- Prefer local browser cookie extraction over manual secret copy/paste.
-- If auth fails, ask the user to re-login via `bili login`.
+- **字幕优先于 AI 摘要**；都没有再转写。
+- 搜索别只看播放量：`--order pubdate --since 7d` 才能拿到近期新内容；`published_at` 是判断「旧闻」最快的字段。
+- 全部命令支持 `--yaml`，比 `--json` 更省 token。
+- **本地转写的模型要自备**：`--model` 可传 huggingface 仓库名或**本地模型目录**。网络受限时设 `HF_ENDPOINT=https://hf-mirror.com`；仍拉不下来就把已下好的 faster-whisper 模型目录用 `--model <dir>` 指过去，或改用 `bili audio <BV> --no-split -o <目录>` 导出音频交外部 ASR。
