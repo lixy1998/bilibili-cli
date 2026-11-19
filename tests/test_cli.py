@@ -234,14 +234,58 @@ def test_video_structured_output_includes_requested_extras(runner, mock_video_in
         assert data["related"][0]["bvid"] == "BV1rel"
 
 
-def test_video_subtitle_error_is_nonfatal(runner, mock_video_info):
+def test_video_subtitle_failure_without_login_is_reported(runner, mock_video_info):
+    """未登录取不到字幕时必须显式失败，不能伪装成"视频没字幕"。"""
     with patch("bili_cli.commands.common.get_credential", return_value=None), \
          patch("bili_cli.client.extract_bvid", return_value="BV1test123"), \
          patch("bili_cli.client.get_video_info", new_callable=AsyncMock, return_value=mock_video_info), \
          patch("bili_cli.client.get_video_subtitle", new_callable=AsyncMock, side_effect=Exception("boom")):
         result = runner.invoke(cli, ["video", "BV1test123", "--subtitle"])
+        assert result.exit_code == 2
+        combined = result.output + result.stderr
+        assert "获取字幕失败" in combined
+        assert "登录" in combined
+
+
+def test_video_subtitle_missing_track_when_logged_in_is_not_an_error(runner, mock_video_info, mock_credential):
+    """已登录、视频确实没有字幕轨：正常返回，退出码 0。"""
+    with patch("bili_cli.commands.common.get_credential", return_value=mock_credential), \
+         patch("bili_cli.client.extract_bvid", return_value="BV1test123"), \
+         patch("bili_cli.client.get_video_info", new_callable=AsyncMock, return_value=mock_video_info), \
+         patch("bili_cli.client.get_video_subtitle", new_callable=AsyncMock, return_value=("", [])):
+        result = runner.invoke(cli, ["video", "BV1test123", "--subtitle"])
         assert result.exit_code == 0
-        assert "获取字幕失败" in result.output
+        assert "没有字幕轨" in (result.output + result.stderr)
+
+
+def test_video_accepts_multiple_bvids(runner, mock_video_info):
+    """一条命令可以给多个 BV 号，结构化输出为 items 列表。"""
+    with patch("bili_cli.commands.common.get_credential", return_value=None), \
+         patch("bili_cli.client.extract_bvid", side_effect=lambda x: x), \
+         patch("bili_cli.client.get_video_info", new_callable=AsyncMock, return_value=mock_video_info):
+        result = runner.invoke(
+            cli,
+            ["video", "BV1test123", "BV1test456", "--json"],
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)["data"]
+        assert data["meta"]["count"] == 2
+        assert len(data["items"]) == 2
+
+
+def test_video_reads_bvids_from_stdin(runner, mock_video_info):
+    """--stdin 支持从管道读取 BV 列表。"""
+    with patch("bili_cli.commands.common.get_credential", return_value=None), \
+         patch("bili_cli.client.extract_bvid", side_effect=lambda x: x), \
+         patch("bili_cli.client.get_video_info", new_callable=AsyncMock, return_value=mock_video_info):
+        result = runner.invoke(
+            cli,
+            ["video", "--stdin", "--json"],
+            input="BV1test123\nBV1test456\n",
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)["data"]
+        assert data["meta"]["count"] == 2
 
 
 def test_video_invalid_bvid(runner):
@@ -891,3 +935,152 @@ def test_version(runner):
     result = runner.invoke(cli, ["--version"])
     assert result.exit_code == 0
     assert "bili" in result.output
+
+
+# ===== Search extras (order / time window / paging) =====
+
+
+def test_search_video_forwards_order_and_since(runner):
+    from datetime import date, timedelta
+
+    mock_results = [{"bvid": "BV1found", "title": "T", "author": "U", "play": 1, "duration": "1:00"}]
+    with patch("bili_cli.client.search_video", new_callable=AsyncMock, return_value=mock_results) as mock_search:
+        result = runner.invoke(
+            cli,
+            ["search", "test", "--type", "video", "--order", "pubdate", "--since", "7d", "--json"],
+        )
+        assert result.exit_code == 0
+        kwargs = mock_search.await_args.kwargs
+        assert kwargs["order"] == "pubdate"
+        assert kwargs["time_start"] == (date.today() - timedelta(days=7)).isoformat()
+
+
+def test_search_video_pages_until_count_reached(runner):
+    page_one = [
+        {"bvid": f"BV1a{i:08d}", "title": "t", "author": "u", "play": 1, "duration": "1:00"}
+        for i in range(42)
+    ]
+    page_two = [
+        {"bvid": f"BV1b{i:08d}", "title": "t", "author": "u", "play": 1, "duration": "1:00"}
+        for i in range(20)
+    ]
+    with patch(
+        "bili_cli.client.search_video",
+        new_callable=AsyncMock,
+        side_effect=[page_one, page_two],
+    ) as mock_search:
+        result = runner.invoke(cli, ["search", "test", "--type", "video", "-n", "50", "--json"])
+        assert result.exit_code == 0
+        assert mock_search.await_count == 2
+        assert len(json.loads(result.stdout)["data"]) == 50
+
+
+def test_search_video_rejects_bad_since(runner):
+    result = runner.invoke(cli, ["search", "test", "--type", "video", "--since", "abc"])
+    assert result.exit_code != 0
+
+
+def test_search_video_full_fields_include_pubdate(runner):
+    mock_results = [
+        {
+            "bvid": "BV1found",
+            "title": "T",
+            "author": "U",
+            "play": 10,
+            "duration": "10:30",
+            "pubdate": 1700000000,
+            "favorites": 99,
+            "review": 7,
+            "mid": 42,
+            "pic": "//i0.hdslb.com/x.jpg",
+            "tag": "历史,教学",
+        }
+    ]
+    with patch("bili_cli.client.search_video", new_callable=AsyncMock, return_value=mock_results):
+        result = runner.invoke(
+            cli, ["search", "test", "--type", "video", "--fields", "full", "--json"]
+        )
+        assert result.exit_code == 0
+        item = json.loads(result.stdout)["data"][0]
+        assert item["published_at"] == "2023-11-15"
+        assert item["duration_seconds"] == 630
+        assert item["stats"]["favorite"] == 99
+        assert item["stats"]["review"] == 7
+        assert item["up"]["id"] == "42"
+        assert item["cover"].startswith("https://")
+        assert item["tags"] == ["历史", "教学"]
+
+
+# ===== Danmaku / crawl =====
+
+
+def test_danmaku_lists_items(runner):
+    items = [{"time": 1.5, "mode": 1, "text": "一条弹幕"}]
+    with patch("bili_cli.client.extract_bvid", return_value="BV1test123"), \
+         patch("bili_cli.client.get_video_danmakus", new_callable=AsyncMock, return_value=items):
+        result = runner.invoke(cli, ["danmaku", "BV1test123"])
+        assert result.exit_code == 0
+        assert "一条弹幕" in (result.output + result.stderr)
+
+
+def test_crawl_outputs_items_with_subtitle(runner):
+    search_payload = {
+        "items": [
+            {
+                "bvid": "BV1crawl",
+                "title": "T",
+                "author": "U",
+                "play": 10,
+                "duration": "5:00",
+                "pubdate": 1700000000,
+            }
+        ],
+        "meta": {"requested": 1, "returned": 1, "pages_fetched": 1},
+    }
+    detail = {
+        "available": True,
+        "reason": "ok",
+        "message": "",
+        "text": "字幕正文",
+        "items": [{"content": "字幕正文"}],
+    }
+    with patch("bili_cli.client.search_video_paged", new_callable=AsyncMock, return_value=search_payload), \
+         patch("bili_cli.client.get_video_subtitle_detailed", new_callable=AsyncMock, return_value=detail), \
+         patch("bili_cli.commands.common.get_credential", return_value=None):
+        result = runner.invoke(cli, ["crawl", "kw", "-n", "1", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)["data"]
+        assert data["items"][0]["subtitle"]["text"] == "字幕正文"
+        assert data["meta"]["missing_subtitle"] == 0
+
+
+def test_crawl_marks_missing_subtitle(runner):
+    search_payload = {
+        "items": [{"bvid": "BV1x", "title": "T", "author": "U", "play": 1, "duration": "1:00"}],
+        "meta": {"requested": 1, "returned": 1, "pages_fetched": 1},
+    }
+    detail = {
+        "available": False,
+        "reason": "not_authenticated",
+        "message": "no sessdata",
+        "text": "",
+        "items": [],
+    }
+    with patch("bili_cli.client.search_video_paged", new_callable=AsyncMock, return_value=search_payload), \
+         patch("bili_cli.client.get_video_subtitle_detailed", new_callable=AsyncMock, return_value=detail), \
+         patch("bili_cli.commands.common.get_credential", return_value=None):
+        result = runner.invoke(cli, ["crawl", "kw", "-n", "1", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)["data"]
+        assert data["meta"]["missing_subtitle"] == 1
+        assert data["items"][0]["subtitle"]["reason"] == "not_authenticated"
+
+
+# ===== Rank zones =====
+
+
+def test_rank_forwards_zone(runner):
+    with patch("bili_cli.client.get_rank_videos", new_callable=AsyncMock, return_value={"list": []}) as mock_rank:
+        result = runner.invoke(cli, ["rank", "--type", "knowledge"])
+        assert result.exit_code == 0
+        mock_rank.assert_awaited_once_with(day=3, type_="knowledge")

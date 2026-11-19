@@ -40,7 +40,63 @@ def _strip_html(text: object) -> str:
 def _normalize_url(url: object) -> str:
     if not isinstance(url, str):
         return ""
-    return url.strip()
+    value = url.strip()
+    if value.startswith("//"):
+        return "https:" + value
+    return value
+
+
+def _pubdate_fields(source: dict[str, Any]) -> dict[str, Any]:
+    """Extract a comparable publish time from any B站 video payload shape."""
+    raw = source.get("pubdate") or source.get("senddate") or source.get("ctime") or 0
+    ts = _to_int(raw, 0)
+    if ts <= 0:
+        return {"published_at": "", "published_ts": 0}
+    try:
+        return {
+            "published_at": datetime.fromtimestamp(ts).strftime("%Y-%m-%d"),
+            "published_ts": ts,
+        }
+    except (OSError, OverflowError, ValueError):
+        return {"published_at": "", "published_ts": 0}
+
+
+def _parse_duration_text(text: object) -> int:
+    """Parse "MM:SS" / "HH:MM:SS" into total seconds."""
+    if isinstance(text, int):
+        return max(text, 0)
+    if not isinstance(text, str) or not text.strip():
+        return 0
+    parts = text.strip().split(":")
+    try:
+        numbers = [int(p) for p in parts]
+    except ValueError:
+        return 0
+    if len(numbers) == 3:
+        return numbers[0] * 3600 + numbers[1] * 60 + numbers[2]
+    if len(numbers) == 2:
+        return numbers[0] * 60 + numbers[1]
+    if len(numbers) == 1:
+        return numbers[0]
+    return 0
+
+
+def _normalize_tags(source: dict[str, Any]) -> list[str]:
+    """Normalize both search-shaped ("tag": "a,b") and info-shaped ("tag": [{tag_name}])."""
+    tags = source.get("tags") or source.get("tag") or []
+    if isinstance(tags, str):
+        return [t.strip() for t in tags.split(",") if t.strip()]
+    if isinstance(tags, list):
+        out: list[str] = []
+        for t in tags:
+            if isinstance(t, str):
+                out.append(t)
+            elif isinstance(t, dict):
+                name = t.get("tag_name") or t.get("name")
+                if name:
+                    out.append(str(name))
+        return out
+    return []
 
 
 def normalize_user(info: dict[str, Any]) -> dict[str, Any]:
@@ -91,6 +147,9 @@ def normalize_video_summary(video: dict[str, Any]) -> dict[str, Any]:
             "favorite": _to_int(stat.get("favorite"), 0),
             "share": _to_int(stat.get("share"), 0),
         },
+        **_pubdate_fields(video),
+        "tags": _normalize_tags(video),
+        "pages": len(video.get("pages") or []) or _to_int(video.get("videos"), 0),
     }
 
 
@@ -138,18 +197,46 @@ def normalize_search_user(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def normalize_search_video(item: dict[str, Any]) -> dict[str, Any]:
+def normalize_search_video(item: dict[str, Any], *, full: bool = False) -> dict[str, Any]:
     duration = item.get("duration", "")
     if not isinstance(duration, str):
         duration = _format_duration(duration)
-    return {
-        "id": str(item.get("bvid", "")),
-        "bvid": item.get("bvid", ""),
+
+    bvid = str(item.get("bvid", ""))
+    payload = {
+        "id": bvid,
+        "bvid": bvid,
         "title": _strip_html(item.get("title")),
         "author": item.get("author", ""),
         "play": _to_int(item.get("play"), 0),
         "duration": duration,
     }
+    if not full:
+        return payload
+
+    payload.update(
+        {
+            **_pubdate_fields(item),
+            "duration_seconds": _parse_duration_text(duration),
+            "up": {
+                "id": str(item.get("mid") or item.get("uid") or ""),
+                "name": item.get("author", ""),
+            },
+            "stats": {
+                "view": _to_int(item.get("play"), 0),
+                "danmaku": _to_int(item.get("video_review") or item.get("danmaku"), 0),
+                "favorite": _to_int(item.get("favorites"), 0),
+                "like": _to_int(item.get("like"), 0),
+                "review": _to_int(item.get("review"), 0),
+            },
+            "cover": _normalize_url(item.get("pic") or item.get("cover")),
+            "url": f"https://www.bilibili.com/video/{bvid}" if bvid else "",
+            "description": _strip_html(item.get("description") or item.get("desc")),
+            "tags": _normalize_tags(item),
+            "typename": item.get("typename", ""),
+        }
+    )
+    return payload
 
 
 def normalize_favorite_folder(item: dict[str, Any]) -> dict[str, Any]:
@@ -272,6 +359,7 @@ def normalize_video_command_payload(
     subtitle_text: str = "",
     subtitle_items: list[dict[str, Any]] | None = None,
     subtitle_format: str = "timeline",
+    subtitle_reason: str = "",
     ai_summary: str = "",
     comments: list[dict[str, Any]] | None = None,
     related: list[dict[str, Any]] | None = None,
@@ -279,6 +367,7 @@ def normalize_video_command_payload(
 ) -> dict[str, Any]:
     subtitle_payload = {
         "available": bool(subtitle_text or subtitle_items),
+        "reason": subtitle_reason,
         "format": subtitle_format,
         "text": subtitle_text,
         "items": normalize_subtitle_items(subtitle_items),

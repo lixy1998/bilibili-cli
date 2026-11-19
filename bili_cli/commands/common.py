@@ -22,6 +22,7 @@ from ..formatter import (  # noqa: F401
     exit_error,
     format_count,
     format_duration,
+    partial_failure_payload,
     resolve_output_format,
     structured_output_options,
     success_payload,
@@ -131,3 +132,34 @@ def extract_bvid_or_exit(bv_or_url: str) -> str:
         return client.extract_bvid(bv_or_url)
     except (InvalidBvidError, ValueError) as e:
         exit_error(str(e), code="invalid_input")
+
+
+def resolve_date(value: str | None, *, param: str = "日期") -> str | None:
+    """Resolve "7d" / "today" / "YYYY-MM-DD" into an ISO date string.
+
+    Keeps the "past N days" shorthand that agents reach for most often,
+    while still accepting an explicit date.
+    """
+    if not value:
+        return None
+
+    from datetime import date, timedelta
+
+    raw = value.strip().lower()
+
+    if raw in {"today", "now"}:
+        return date.today().isoformat()
+
+    if raw.endswith("d") and raw[:-1].isdigit():
+        days = int(raw[:-1])
+        if days <= 0:
+            exit_error(f"{param} 的 'Nd' 简写必须是正整数: {value}", code="invalid_input")
+        return (date.today() - timedelta(days=days)).isoformat()
+
+    try:
+        return date.fromisoformat(raw).isoformat()
+    except ValueError:
+        exit_error(
+            f"{param} 格式不支持: {value}（可用 2026-11-01、7d、30d、today）",
+            code="invalid_input",
+        )

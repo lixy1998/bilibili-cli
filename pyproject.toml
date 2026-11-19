@@ -1,6 +1,6 @@
 [project]
 name = "bilibili-cli"
-version = "0.6.2"
+version = "0.7.0"
 description = "A CLI for Bilibili — browse videos, users, favorites from the terminal"
 readme = "README.md"
 license = "Apache-2.0"
@@ -27,6 +27,13 @@ dependencies = [
 [project.optional-dependencies]
 audio = [
     "av>=14.0",
+]
+asr = [
+    "faster-whisper>=1.0",
+    "av>=14.0",
+]
+frames = [
+    "pillow>=10.0",
 ]
 dev = [
     "pytest>=8.0",

@@ -93,6 +93,25 @@ def error_payload(code: str, message: str, *, details: object | None = None) -> 
     }
 
 
+def partial_failure_payload(
+    data: object, *, code: str, message: str
+) -> dict[str, object]:
+    """Wrap usable data that came with a failed sub-request.
+
+    Keeps `ok: false` visible to agents while still returning the payload they
+    asked for, so a failed subtitle fetch never masquerades as "no subtitle".
+    """
+    return {
+        "ok": False,
+        "schema_version": _SCHEMA_VERSION,
+        "data": data,
+        "error": {
+            "code": code,
+            "message": message,
+        },
+    }
+
+
 def _normalize_success_payload(data: object) -> object:
     """Wrap plain structured data in the shared agent success schema."""
     if isinstance(data, dict) and data.get("schema_version") == _SCHEMA_VERSION and "ok" in data:

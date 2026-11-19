@@ -209,6 +209,156 @@ async def get_video_subtitle(
     return "", []
 
 
+async def get_video_subtitle_detailed(
+    bvid: str, credential: Credential | None = None
+) -> dict[str, Any]:
+    """Fetch subtitle with an explicit machine-readable reason when unavailable.
+
+    Unlike `get_video_subtitle`, this never collapses "not logged in" and
+    "video has no subtitle track" into the same empty result.
+
+    reason ∈ {ok, not_authenticated, no_subtitle_track, no_pages, download_failed, error}
+    """
+    result: dict[str, Any] = {
+        "available": False,
+        "reason": "error",
+        "message": "",
+        "text": "",
+        "items": [],
+    }
+
+    v = video.Video(bvid=bvid, credential=credential)
+
+    try:
+        pages = await _call_api("获取视频分P信息", v.get_pages())
+    except BiliError as e:
+        result.update(reason="error", message=str(e))
+        return result
+
+    if not pages:
+        result.update(reason="no_pages", message="未取到分P信息")
+        return result
+
+    cid = pages[0].get("cid")
+    if not cid:
+        result.update(reason="no_pages", message="未取到 cid")
+        return result
+
+    try:
+        player_info = await _call_api("获取播放器信息", v.get_player_info(cid=cid))
+    except AuthenticationError as e:
+        result.update(reason="not_authenticated", message=str(e))
+        return result
+    except BiliError as e:
+        result.update(reason="error", message=str(e))
+        return result
+
+    subtitle_info = player_info.get("subtitle") or {}
+    subtitle_list = subtitle_info.get("subtitles") or []
+    if not subtitle_list:
+        result.update(reason="no_subtitle_track", message="该视频没有字幕轨")
+        return result
+
+    subtitle_url = ""
+    for sub in subtitle_list:
+        if "zh" in str(sub.get("lan", "")).lower():
+            subtitle_url = sub.get("subtitle_url", "")
+            break
+    if not subtitle_url:
+        subtitle_url = subtitle_list[0].get("subtitle_url", "")
+    if subtitle_url.startswith("//"):
+        subtitle_url = "https:" + subtitle_url
+    if not subtitle_url:
+        result.update(reason="no_subtitle_track", message="字幕轨缺少下载地址")
+        return result
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(subtitle_url) as resp:
+                resp.raise_for_status()
+                subtitle_data = await resp.json(content_type=None)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+        result.update(reason="download_failed", message=f"下载字幕失败: {e}")
+        return result
+
+    raw = subtitle_data.get("body") or []
+    if not raw:
+        result.update(reason="no_subtitle_track", message="字幕内容为空")
+        return result
+
+    texts = [item.get("content", "") for item in raw]
+    result.update(
+        available=True,
+        reason="ok",
+        message="",
+        text="\n".join(texts),
+        items=raw,
+    )
+    return result
+
+
+async def get_video_danmakus(
+    bvid: str, limit: int = 100, page_index: int = 0
+) -> list[dict[str, Any]]:
+    """Fetch danmaku (bullet comments) for a video."""
+    v = video.Video(bvid=bvid)
+    raw = await _call_api("获取弹幕", v.get_danmakus(page_index=page_index))
+
+    items: list[dict[str, Any]] = []
+    for d in raw or []:
+        text = getattr(d, "text", "") or ""
+        if not text:
+            continue
+        items.append(
+            {
+                "time": round(float(getattr(d, "dm_time", 0.0) or 0.0), 2),
+                "mode": getattr(d, "mode", None),
+                "text": text,
+            }
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
+async def get_video_storyboard(bvid: str, page_index: int = 0) -> dict[str, Any]:
+    """Fetch storyboard (videoshot) metadata used for frame extraction.
+
+    Returns the raw payload: image sheets, per-frame timestamps and grid size.
+    """
+    v = video.Video(bvid=bvid)
+    pages = await _call_api("获取视频分P信息", v.get_pages())
+    if not pages:
+        raise NotFoundError(f"未取到分P信息: {bvid}")
+
+    index = min(max(page_index, 0), len(pages) - 1)
+    cid = pages[index].get("cid")
+    if not cid:
+        raise NotFoundError(f"未取到 cid: {bvid}")
+
+    api = "https://api.bilibili.com/x/player/videoshot"
+    params = {"bvid": bvid, "cid": cid, "index": 1}
+    headers = {"User-Agent": _USER_AGENT, "Referer": "https://www.bilibili.com"}
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with session.get(api, params=params) as resp:
+                resp.raise_for_status()
+                payload = await resp.json(content_type=None)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+        raise NetworkError(f"获取故事板失败: {e}") from e
+
+    if payload.get("code") != 0:
+        raise BiliError(f"获取故事板失败: [{payload.get('code')}] {payload.get('message')}")
+
+    data = payload.get("data") or {}
+    if not data.get("image"):
+        raise NotFoundError("该视频没有故事板（可能过短或未生成）")
+    return data
+
+
 # ---------------------------------------------------------------------------
 # User
 # ---------------------------------------------------------------------------
@@ -331,10 +481,65 @@ async def get_hot_videos(pn: int = 1, ps: int = 20) -> dict[str, Any]:
     return await _call_api("获取热门视频", hot.get_hot_videos(pn=pn, ps=ps))
 
 
-async def get_rank_videos(day: int = 3) -> dict[str, Any]:
-    """Fetch ranking videos (default: 3-day rank)."""
+_RANK_TYPE_NAMES = {
+    "all": "All",
+    "bangumi": "Bangumi",
+    "guochuang": "Guochuang",
+    "documentary": "Documentary",
+    "douga": "Douga",
+    "music": "Music",
+    "dance": "Dance",
+    "game": "Game",
+    "knowledge": "Knowledge",
+    "tech": "Technology",
+    "sports": "Sports",
+    "car": "Car",
+    "life": "Life",
+    "food": "Food",
+    "animal": "Animal",
+    "kichiku": "Kichiku",
+    "fashion": "Fashion",
+    "ent": "Ent",
+    "cinephile": "Cinephile",
+    "movie": "Movie",
+    "tv": "TV",
+    "variety": "Variety",
+    "original": "Original",
+    "rookie": "Rookie",
+}
+
+# Built defensively: upstream enum names drift between releases.
+_RANK_TYPES = {
+    key: getattr(rank.RankType, attr)
+    for key, attr in _RANK_TYPE_NAMES.items()
+    if hasattr(rank.RankType, attr)
+}
+RANK_TYPE_KEYS = tuple(_RANK_TYPES)
+
+
+def resolve_rank_type(name: str | None):
+    """Map a CLI-friendly zone name to the upstream RankType enum."""
+    if not name:
+        return rank.RankType.All
+    key = name.strip().lower()
+    if key not in _RANK_TYPES:
+        raise InvalidBvidError(
+            f"不支持的排行榜分区: {name}（可选: {', '.join(_RANK_TYPES)}）"
+        )
+    return _RANK_TYPES[key]
+
+
+async def get_rank_videos(day: int = 3, type_: str | None = None) -> dict[str, Any]:
+    """Fetch ranking videos (default: 3-day rank).
+
+    Passing an "all" zone keeps the original call shape (`get_rank(day=...)`),
+    which is also what upstream defaults to.
+    """
     day_type = rank.RankDayType.THREE_DAY if day == 3 else rank.RankDayType.WEEK
-    return await _call_api("获取排行榜", rank.get_rank(day=day_type))
+    resolved = resolve_rank_type(type_)
+    if resolved is rank.RankType.All:
+        return await _call_api("获取排行榜", rank.get_rank(day=day_type))
+    return await _call_api("获取排行榜", rank.get_rank(type_=resolved, day=day_type))
 
 
 # ---------------------------------------------------------------------------
@@ -463,14 +668,174 @@ async def get_related_videos(
 # ---------------------------------------------------------------------------
 
 
-async def search_video(keyword: str, page: int = 1) -> list[dict[str, Any]]:
-    """Search for videos by keyword."""
-    res = await _call_api("搜索视频", search.search_by_type(
-        keyword=keyword,
-        search_type=search.SearchObjectType.VIDEO,
-        page=page,
-    ))
+_VIDEO_ORDER_ALIASES = {
+    "totalrank": search.OrderVideo.TOTALRANK,
+    "click": search.OrderVideo.CLICK,
+    "pubdate": search.OrderVideo.PUBDATE,
+    "dm": search.OrderVideo.DM,
+    "stow": search.OrderVideo.STOW,
+    "scores": search.OrderVideo.SCORES,
+}
+
+# The upstream library treats time_range as a *minute* count and buckets it.
+_DURATION_MINUTES = {
+    "lt10": 5,
+    "10-30": 20,
+    "30-60": 45,
+    "gt60": 90,
+}
+
+DEFAULT_SEARCH_PAGE_SIZE = 42
+
+
+def resolve_video_order(order: str | None):
+    """Map a CLI-friendly order name to the upstream enum."""
+    if not order:
+        return None
+    key = order.strip().lower()
+    if key not in _VIDEO_ORDER_ALIASES:
+        raise InvalidBvidError(
+            f"不支持的排序方式: {order}（可选: {', '.join(_VIDEO_ORDER_ALIASES)}）"
+        )
+    return _VIDEO_ORDER_ALIASES[key]
+
+
+async def search_video(
+    keyword: str,
+    page: int = 1,
+    *,
+    order: str | None = None,
+    time_start: str | None = None,
+    time_end: str | None = None,
+    duration: str | None = None,
+    tid: int | None = None,
+    page_size: int | None = None,
+) -> list[dict[str, Any]]:
+    """Search for videos by keyword, with optional ordering and filters.
+
+    Keyword-only extras are only forwarded when provided so that the plain
+    call shape (`search_video(keyword, page=N)`) stays unchanged.
+    """
+    params: dict[str, Any] = {
+        "keyword": keyword,
+        "search_type": search.SearchObjectType.VIDEO,
+        "page": page,
+    }
+
+    resolved_order = resolve_video_order(order)
+    if resolved_order is not None:
+        params["order_type"] = resolved_order
+    if time_start:
+        params["time_start"] = time_start
+    if time_end:
+        params["time_end"] = time_end
+    if duration:
+        key = duration.strip().lower()
+        if key not in _DURATION_MINUTES:
+            raise InvalidBvidError(
+                f"不支持的时长筛选: {duration}（可选: {', '.join(_DURATION_MINUTES)}）"
+            )
+        params["time_range"] = _DURATION_MINUTES[key]
+    if tid is not None:
+        params["video_zone_type"] = tid
+    if page_size:
+        params["page_size"] = page_size
+
+    res = await _call_api("搜索视频", search.search_by_type(**params))
     return res.get("result", [])
+
+
+async def search_video_paged(
+    keyword: str,
+    count: int = 20,
+    page: int = 1,
+    *,
+    order: str | None = None,
+    time_start: str | None = None,
+    time_end: str | None = None,
+    duration: str | None = None,
+    tid: int | None = None,
+    page_size: int = DEFAULT_SEARCH_PAGE_SIZE,
+    max_pages: int = 10,
+    exclude_bvids: set[str] | None = None,
+) -> dict[str, Any]:
+    """Search videos and page through results until `count` items are collected.
+
+    `exclude_bvids` is applied while paging, so filtered results still let the
+    loop walk forward until enough *new* videos are found.
+
+    Returns {"items": [...], "meta": {...}} where meta records whether the
+    requested count was actually reached (so callers never silently truncate).
+    """
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    known = exclude_bvids or set()
+    skipped_seen = 0
+    current = page
+    pages_fetched = 0
+    exhausted = False
+
+    extras: dict[str, Any] = {}
+    if order:
+        extras["order"] = order
+    if time_start:
+        extras["time_start"] = time_start
+    if time_end:
+        extras["time_end"] = time_end
+    if duration:
+        extras["duration"] = duration
+    if tid is not None:
+        extras["tid"] = tid
+    if page_size and page_size != DEFAULT_SEARCH_PAGE_SIZE:
+        extras["page_size"] = page_size
+
+    while len(items) < count and pages_fetched < max_pages:
+        batch = await search_video(keyword, page=current, **extras)
+        pages_fetched += 1
+        if not batch:
+            exhausted = True
+            break
+
+        for item in batch:
+            bvid = item.get("bvid", "")
+            if not bvid or bvid in seen:
+                continue
+            if bvid in known:
+                skipped_seen += 1
+                continue
+            seen.add(bvid)
+            items.append(item)
+            if len(items) >= count:
+                break
+
+        # A short page means this was the last page — stop instead of
+        # re-requesting the same tail over and over.
+        if len(batch) < page_size:
+            exhausted = True
+            break
+
+        current += 1
+
+    trimmed = items[:count]
+    return {
+        "items": trimmed,
+        "meta": {
+            "requested": count,
+            "returned": len(trimmed),
+            "pages_fetched": pages_fetched,
+            "page_start": page,
+            "page_size": page_size,
+            "order": order or "totalrank",
+            "since": time_start,
+            "until": time_end,
+            "duration": duration,
+            "tid": tid,
+            "truncated": len(trimmed) < count,
+            "exhausted": exhausted,
+            "hit_page_cap": pages_fetched >= max_pages and len(trimmed) < count,
+            "skipped_seen": skipped_seen,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -634,31 +999,29 @@ _DOWNLOAD_HEADERS = {
 
 
 async def get_audio_url(bvid: str, credential: Credential | None = None) -> str:
-    """Get the best audio stream URL for a video (DASH preferred)."""
-    from bilibili_api.video import AudioQuality, VideoDownloadURLDataDetecter
+    """Get the best audio stream URL for a video.
 
+    Reads the DASH manifest directly instead of going through upstream's
+    `detect_best_streams`, which crashes on unauthenticated/no-video-stream
+    responses (None entries in its sort key).
+    """
     v = video.Video(bvid=bvid, credential=credential)
     download_data = await _call_api("获取下载地址", v.get_download_url(page_index=0))
-    detector = VideoDownloadURLDataDetecter(download_data)
-    streams = detector.detect_best_streams(
-        audio_max_quality=AudioQuality._64K,
-        no_dolby_audio=True,
-        no_hires=True,
-    )
 
-    if detector.check_flv_mp4_stream():
-        if streams and streams[0] and hasattr(streams[0], "url"):
-            return streams[0].url
-    else:
-        # DASH: audio is at index 1
-        if len(streams) >= 2 and streams[1] is not None and hasattr(streams[1], "url"):
-            return streams[1].url
-        # Fallback: find any stream with audio_quality
-        for s in streams:
-            if s is not None and hasattr(s, "audio_quality"):
-                return s.url
+    dash = download_data.get("dash") or {}
+    audios = dash.get("audio") or []
+    if audios:
+        best = max(audios, key=lambda a: a.get("bandwidth", 0) or 0)
+        url = best.get("baseUrl") or best.get("base_url") or ""
+        if url:
+            return url
 
-    raise BiliError("无法获取音频流（可能是会员专属视频）")
+    # FLV / MP4 fallback (durl) — audio is muxed into the single file.
+    durl = download_data.get("durl") or []
+    if durl and isinstance(durl[0], dict) and durl[0].get("url"):
+        return durl[0]["url"]
+
+    raise BiliError("无法获取音频流（可能是会员专属或付费视频）")
 
 
 async def download_audio(audio_url: str, output_path: str) -> int:

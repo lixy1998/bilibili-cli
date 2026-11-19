@@ -6,7 +6,10 @@ import click
 from rich.table import Table
 
 from .. import payloads
+from ..client import RANK_TYPE_KEYS
 from . import common
+
+RANK_TYPE_CHOICES = list(RANK_TYPE_KEYS)
 
 
 @click.command(name="hot")
@@ -61,20 +64,33 @@ def hot_cmd(page: int, count: int, as_json: bool, as_yaml: bool):
 
 @click.command(name="rank")
 @click.option("--day", default="3", type=click.Choice(["3", "7"]), help="排行周期：3 或 7 天（默认 3）。")
+@click.option(
+    "--type",
+    "rank_type",
+    default="all",
+    type=click.Choice(RANK_TYPE_CHOICES),
+    show_default=True,
+    help="排行榜分区（默认 all 全站）。",
+)
 @click.option("--max", "-n", "count", default=20, type=click.IntRange(1), help="显示数量 (默认 20，最小 1)。")
 @common.structured_output_options
-def rank_cmd(day: str, count: int, as_json: bool, as_yaml: bool):
-    """查看全站排行榜。"""
+def rank_cmd(day: str, rank_type: str, count: int, as_json: bool, as_yaml: bool):
+    """查看排行榜（支持分区）。"""
     from .. import client
 
     output_format = common.resolve_output_format(as_json=as_json, as_yaml=as_yaml)
 
-    data = common.run_or_exit(client.get_rank_videos(day=int(day)), "获取排行榜失败")
+    rank_kwargs: dict[str, object] = {"day": int(day)}
+    if rank_type != "all":
+        rank_kwargs["type_"] = rank_type
+
+    data = common.run_or_exit(client.get_rank_videos(**rank_kwargs), "获取排行榜失败")
 
     if common.emit_structured(
         {
             "items": [payloads.normalize_video_summary(item) for item in (data.get("list") or [])[:count]],
             "day": int(day),
+            "type": rank_type,
             "count": count,
         },
         output_format,
@@ -86,7 +102,7 @@ def rank_cmd(day: str, count: int, as_json: bool, as_yaml: bool):
         common.console.print("[yellow]未获取到排行榜数据[/yellow]")
         return
 
-    table = Table(title="🏆 全站排行榜", border_style="yellow")
+    table = Table(title=f"🏆 排行榜（{rank_type}）", border_style="yellow")
     table.add_column("#", style="bold", width=4)
     table.add_column("BV号", style="cyan", width=14)
     table.add_column("标题", max_width=36)

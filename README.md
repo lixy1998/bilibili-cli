@@ -7,6 +7,15 @@
 
 A CLI for Bilibili — browse videos, users, favorites from the terminal 📺
 
+> **This is a local fork (v0.7.0)** of [jackwener/bilibili-cli](https://github.com/jackwener/bilibili-cli), focused on the **search → read content** chain. Upstream stops at "keyword + page"; this fork adds ordering, time windows, zone filters, full result fields, multi-page paging, batch video input, danmaku, one-shot `crawl`, storyboard `frames`, local `transcribe`, and a cross-run `seen` ledger.
+>
+> 本地 fork（v0.7.0）：在「搜索 → 读内容」这条链上做了增强 —— 排序、时间窗、分区筛选、搜索结果全字段、自动翻页、批量取详情、弹幕、`crawl` 一步出汇总、故事板抽帧、本地转写、跨轮去重账本。完整变更见 [CHANGELOG.md](./CHANGELOG.md)。
+>
+> ```bash
+> pip install -e . --no-deps
+> bili search "历史教学" --type video --order pubdate --since 7d -n 30 --fields full --meta --yaml
+> ```
+
 [English](#features) | [中文](#功能特性)
 
 ## More Projects

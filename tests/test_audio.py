@@ -32,32 +32,49 @@ def mock_video_info():
 
 @pytest.mark.asyncio
 async def test_get_audio_url_dash():
-    mock_download_data = {"dash": {"audio": [{"baseUrl": "https://example.com/audio.m4s"}]}}
-    mock_stream = MagicMock()
-    mock_stream.url = "https://example.com/audio.m4s"
-    mock_stream.audio_quality = 30216
+    mock_download_data = {
+        "dash": {
+            "audio": [
+                {"baseUrl": "https://example.com/low.m4s", "bandwidth": 64000},
+                {"baseUrl": "https://example.com/audio.m4s", "bandwidth": 132000},
+            ]
+        }
+    }
 
-    with patch("bili_cli.client.video.Video") as MockVideo, \
-         patch("bili_cli.client.video.VideoDownloadURLDataDetecter") as MockDetector:
+    with patch("bili_cli.client.video.Video") as MockVideo:
         MockVideo.return_value.get_download_url = AsyncMock(return_value=mock_download_data)
-        detector_instance = MockDetector.return_value
-        detector_instance.check_flv_mp4_stream.return_value = False
-        detector_instance.detect_best_streams.return_value = [None, mock_stream]
 
         url = await client.get_audio_url("BV1test12345")
+        # 取带宽最高的一条
         assert url == "https://example.com/audio.m4s"
+
+
+@pytest.mark.asyncio
+async def test_get_audio_url_supports_base_url_camel_snake():
+    mock_download_data = {"dash": {"audio": [{"base_url": "https://example.com/a.m4s"}]}}
+
+    with patch("bili_cli.client.video.Video") as MockVideo:
+        MockVideo.return_value.get_download_url = AsyncMock(return_value=mock_download_data)
+        url = await client.get_audio_url("BV1test12345")
+        assert url == "https://example.com/a.m4s"
+
+
+@pytest.mark.asyncio
+async def test_get_audio_url_falls_back_to_durl():
+    mock_download_data = {"durl": [{"url": "https://example.com/muxed.flv"}]}
+
+    with patch("bili_cli.client.video.Video") as MockVideo:
+        MockVideo.return_value.get_download_url = AsyncMock(return_value=mock_download_data)
+        url = await client.get_audio_url("BV1test12345")
+        assert url == "https://example.com/muxed.flv"
 
 
 @pytest.mark.asyncio
 async def test_get_audio_url_no_stream_raises():
     mock_download_data = {}
 
-    with patch("bili_cli.client.video.Video") as MockVideo, \
-         patch("bili_cli.client.video.VideoDownloadURLDataDetecter") as MockDetector:
+    with patch("bili_cli.client.video.Video") as MockVideo:
         MockVideo.return_value.get_download_url = AsyncMock(return_value=mock_download_data)
-        detector_instance = MockDetector.return_value
-        detector_instance.check_flv_mp4_stream.return_value = False
-        detector_instance.detect_best_streams.return_value = [None, None]
 
         with pytest.raises(BiliError, match="无法获取音频流"):
             await client.get_audio_url("BV1test12345")

@@ -16,7 +16,21 @@ from __future__ import annotations
 import click
 
 from . import __version__
-from .commands import account, audio, collections, common, discovery, interactions, user_search, video
+from .commands import (
+    account,
+    audio,
+    collections,
+    common,
+    crawl,
+    danmaku,
+    discovery,
+    frames,
+    interactions,
+    seen,
+    transcribe,
+    user_search,
+    video,
+)
 
 
 # Keep helper names for backward compatibility with tests/importers.
@@ -43,6 +57,11 @@ cli.add_command(account.status)
 cli.add_command(account.whoami)
 
 cli.add_command(video.video)
+cli.add_command(danmaku.danmaku)
+cli.add_command(frames.frames)
+cli.add_command(crawl.crawl)
+cli.add_command(seen.seen)
+cli.add_command(transcribe.transcribe)
 
 cli.add_command(user_search.user)
 cli.add_command(user_search.user_videos)
