@@ -127,4 +127,9 @@ bili like / coin / triple <BV>
 - **字幕优先于 AI 摘要**；都没有再转写。
 - 搜索别只看播放量：`--order pubdate --since 7d` 才能拿到近期新内容；`published_at` 是判断「旧闻」最快的字段。
 - 全部命令支持 `--yaml`，比 `--json` 更省 token。
-- **本地转写的模型要自备**：`--model` 可传 huggingface 仓库名或**本地模型目录**。网络受限时设 `HF_ENDPOINT=https://hf-mirror.com`；仍拉不下来就把已下好的 faster-whisper 模型目录用 `--model <dir>` 指过去，或改用 `bili audio <BV> --no-split -o <目录>` 导出音频交外部 ASR。
+- **本地转写（已验证可用）**：模型放在 `~/.bilibili-cli/models/`，推荐 `faster-whisper-large-v3-turbo`（中文讲课准确，CPU int8 约 1.5–3 分钟处理 8 分钟音频），备选 `faster-whisper-tiny`（快但中文弱，仅应急）。**不传 `--model` 会自动挑该目录下可用的模型**：
+  ```bash
+  bili transcribe <BV> --with-segments --yaml
+  ```
+- 模型目录需含 5 个文件：`model.bin` / `config.json` / `tokenizer.json` / `vocabulary.json` / `preprocessor_config.json`。huggingface.co 直连不通时，用 `curl -sL https://hf-mirror.com/<repo>/resolve/main/<文件名> -o <目标>` 逐个补齐即可（`--model` 也接受本地目录，不依赖 HF 缓存结构）。
+- 转写默认开 VAD；整段被判静音时会**自动关闭 VAD 重试一次**（输出 `vad_fallback: true`）。若仍为空，多半是音频里本来没有人声（B站部分科普视频只有配乐），不是链路故障。
